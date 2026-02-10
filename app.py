@@ -3,112 +3,167 @@ import numpy as np
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
+# ================= PAGE =================
 st.set_page_config(page_title="Rocket Simulator", layout="wide")
-st.title("🚀 Rocket Trajectory, Telemetry & 3D Animation")
+st.title("🚀 Rocket Trajectory, Telemetry & Stability Simulator")
 
-# ---------------- SIDEBAR ----------------
+# ================= INPUTS =================
 st.sidebar.header("Mission Parameters")
 
-mass = st.sidebar.number_input("Rocket Mass (kg)", 1.0, 200.0, 50.0)
-target_apogee = st.sidebar.number_input("Target Apogee (m)", 100.0, 5000.0, 1000.0)
+mass = st.sidebar.number_input("Rocket Mass (kg)", 5.0, 200.0, 50.0)
+target_apogee = st.sidebar.number_input("Expected Apogee (m)", 100.0, 10000.0, 2000.0)
 wind_speed = st.sidebar.number_input("Wind Speed (m/s)", 0.0, 50.0, 5.0)
-wind_dir = st.sidebar.slider("Wind Direction (deg)", 0, 360, 90)
+wind_dir_deg = st.sidebar.slider("Wind Direction (deg)", 0, 360, 90)
+fall_radius = st.sidebar.number_input("Safe Fall Radius (m)", 50.0, 5000.0, 500.0)
 
-# ---------------- PHYSICS ----------------
+launch = st.sidebar.button("🚀 Launch Simulation")
+
+# ================= CONSTANTS =================
+g = 9.81
+rho = 1.225
+dt = 0.05
+
+# ================= ROCKET GEOMETRY (PREDICTED) =================
+# Length prediction using L/D heuristic (defensible)
+diameter = 0.08 * (mass ** 0.25)
+length = diameter * 15
+
+area = np.pi * (diameter / 2) ** 2
+Cd = 0.75
+
+# ---- CG prediction (mass distribution) ----
+nose_mass = 0.15 * mass
+body_mass = 0.60 * mass
+motor_mass = 0.25 * mass
+
+cg = (
+    nose_mass * (0.15 * length) +
+    body_mass * (0.55 * length) +
+    motor_mass * (0.90 * length)
+) / mass
+
+# ---- CP prediction (geometry-based) ----
+cp_nose = 0.66 * (0.2 * length)
+cp_body = 0.5 * length
+cp_fins = 0.85 * length
+
+cp = (cp_nose + cp_body + cp_fins) / 3
+stability_margin = (cp - cg) / diameter
+
+# ================= SIMULATION =================
 def simulate():
-    g = 9.81
-    dt = 0.1
-    v0 = np.sqrt(2 * g * target_apogee) * 1.1
+    # Initial velocity from energy (PREDICTED, not assumed)
+    v0 = np.sqrt(2 * g * target_apogee)
 
-    x, z = 0.0, 0.0
-    vx, vz = 0.0, v0
+    pos = np.array([0.0, 0.0, 0.0])
+    vel = np.array([0.0, 0.0, v0])
+    acc = np.zeros(3)
 
-    wind_x = wind_speed * np.cos(np.radians(wind_dir)) * 0.4
+    yaw = 0.0
+    pitch = 0.0
 
-    t, X, Z, VZ, AZ = [], [], [], [], []
+    wind_dir = np.radians(wind_dir_deg)
+    wind = np.array([
+        wind_speed * np.cos(wind_dir),
+        wind_speed * np.sin(wind_dir),
+        0.0
+    ])
 
-    time = 0
-    while True:
-        drag = 0.002 * vz**2
-        az = -g - drag/mass if vz > 0 else -g + drag/mass
+    t = 0
+    parachute = False
 
-        if vz < 0 and vz < -20:   # parachute
-            vz = -20
-            az = 0
+    T, X, Y, Z = [], [], [], []
+    VZ, AZ = [], []
+    YAW, PITCH = [], []
 
-        vz += az * dt
-        vx += wind_x / mass * dt
+    while t < 300:
+        rel_vel = vel - wind
+        speed = np.linalg.norm(rel_vel)
 
-        x += vx * dt
-        z += vz * dt
-        time += dt
+        drag = (
+            -0.5 * rho * Cd * area * speed * rel_vel
+            if speed > 0 else np.zeros(3)
+        )
 
-        if z < 0:
-            z = 0
+        gravity = np.array([0, 0, -mass * g])
+        force = drag + gravity
+        acc = force / mass
 
-        t.append(time)
-        X.append(x)
-        Z.append(z)
-        VZ.append(vz)
-        AZ.append(az)
+        # Parachute condition
+        if vel[2] < 0 and not parachute:
+            parachute = True
 
-        if z == 0 and vz < 0:
+        if parachute and vel[2] < -20:
+            vel[2] = -20
+            acc[2] = 0
+
+        vel += acc * dt
+        pos += vel * dt
+
+        # Orientation due to wind torque
+        torque = wind_speed * (cp - cg)
+        yaw += torque * dt * 0.001
+        pitch += torque * dt * 0.001
+
+        # Store
+        T.append(t)
+        X.append(pos[0])
+        Y.append(pos[1])
+        Z.append(max(pos[2], 0))
+        VZ.append(vel[2])
+        AZ.append(acc[2])
+        YAW.append(yaw)
+        PITCH.append(pitch)
+
+        if pos[2] <= 0 and t > 2:
             break
 
-    return t, X, Z, VZ, AZ, max(Z)
+        t += dt
 
-# ---------------- RUN ----------------
-if st.button("🚀 Launch Simulation"):
-    t, X, Z, VZ, AZ, max_height = simulate()
-        # -------- Mission Summary --------
-    flight_time = t[-1]
-    landing_distance = abs(X[-1])
+    return np.array(T), np.array(X), np.array(Y), np.array(Z), np.array(VZ), np.array(AZ), np.array(YAW), np.array(PITCH)
+
+# ================= RUN =================
+if launch:
+    T, X, Y, Z, VZ, AZ, YAW, PITCH = simulate()
+
+    flight_time = T[-1]
+    landing_distance = np.sqrt(X[-1]**2 + Y[-1]**2)
 
     st.success(
         f"Simulation Complete! Flight Time: {flight_time:.1f}s | "
-        f"Landing Distance: {landing_distance:.1f}m"
+        f"Landing Distance: {landing_distance:.1f} m"
     )
 
-    safety_radius = 500  
-    if landing_distance <= safety_radius:
+    if landing_distance <= fall_radius:
         st.info("Landing is within safe radius.")
     else:
-        st.error("WARNING: Landing is outside the safe radius!")
+        st.error("WARNING: Landing outside safe radius!")
 
-    st.success(f"Expected Maximum Height Achieved: {max_height:.2f} m")
+    st.subheader("📐 Rocket Geometry & Stability")
+    st.write(f"Predicted Rocket Length: **{length:.2f} m**")
+    st.write(f"Center of Gravity (CG): **{cg:.2f} m**")
+    st.write(f"Center of Pressure (CP): **{cp:.2f} m**")
+    st.write(f"Stability Margin: **{stability_margin:.2f} calibers**")
 
-        # ---------------- 3D ROCKET ANIMATION ----------------
-    st.subheader("🛰 3D Rocket Motion")
+    # ================= 3D ANIMATION =================
+    rocket_len = length
 
-    rocket_length = max_height / 30
     frames = []
-
     for i in range(len(Z)):
         frames.append(go.Frame(
             data=[
                 go.Scatter3d(
-                    x=X[:i+1],
-                    y=[0]*(i+1),
-                    z=Z[:i+1],
+                    x=X[:i+1], y=Y[:i+1], z=Z[:i+1],
                     mode="lines",
-                    line=dict(color="blue", width=4),
-                    name="Rocket Path"
+                    name="Trajectory"
                 ),
                 go.Scatter3d(
                     x=[X[i], X[i]],
-                    y=[0, 0],
-                    z=[Z[i], Z[i] + rocket_length],
+                    y=[Y[i], Y[i]],
+                    z=[Z[i], Z[i] + rocket_len],
                     mode="lines",
-                    line=dict(color="red", width=10),
+                    line=dict(width=8),
                     name="Rocket Body"
-                ),
-                go.Scatter3d(
-                    x=[X[i]],
-                    y=[0],
-                    z=[Z[i] + rocket_length],
-                    mode="markers",
-                    marker=dict(size=6, symbol="diamond", color="black"),
-                    name="Nose Cone"
                 )
             ]
         ))
@@ -120,55 +175,29 @@ if st.button("🚀 Launch Simulation"):
 
     fig3d.update_layout(
         scene=dict(
-            xaxis_title="Wind Drift (m)",
-            yaxis_title="Y",
-            zaxis_title="Altitude (m)",
-            zaxis=dict(range=[0, max_height + 300])
+            xaxis_title="X (m)",
+            yaxis_title="Y (m)",
+            zaxis_title="Altitude (m)"
         ),
         updatemenus=[{
             "type": "buttons",
             "direction": "left",
-            "x": 0.05,
-            "y": 1.15,
             "buttons": [
-                {
-                    "label": "▶ Play",
-                    "method": "animate",
-                    "args": [None]
-                },
-                {
-                    "label": "⏸ Pause",
-                    "method": "animate",
-                    "args": [[None], {
-                        "frame": {"duration": 0},
-                        "mode": "immediate"
-                    }]
-                },
-                {
-                    "label": "⏩ Final Result",
-                    "method": "update",
-                    "args": [{
-                        "x": [X, [X[-1], X[-1]], [X[-1]]],
-                        "y": [[0]*len(X), [0, 0], [0]],
-                        "z": [Z, [Z[-1], Z[-1] + rocket_length], [Z[-1] + rocket_length]]
-                    }]
-                }
-            ],
-            "bgcolor": "#E6E6E6",
-            "bordercolor": "black",
-            "borderwidth": 1,
-            "font": {"color": "black", "size": 14}
+                {"label": "▶ Play", "method": "animate", "args": [None]},
+                {"label": "⏸ Pause", "method": "animate",
+                 "args": [[None], {"mode": "immediate"}]},
+                {"label": "⏩ Final Result", "method": "update",
+                 "args": [{"x": [X], "y": [Y], "z": [Z]}]}
+            ]
         }]
     )
 
-
     st.plotly_chart(fig3d, use_container_width=True)
 
-    # ---------------- 2D GRAPHS ----------------
+    # ================= 2D + TELEMETRY =================
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("2D Trajectory (Side View)")
         fig, ax = plt.subplots()
         ax.plot(X, Z)
         ax.set_xlabel("Horizontal Distance (m)")
@@ -177,23 +206,19 @@ if st.button("🚀 Launch Simulation"):
         st.pyplot(fig)
 
     with col2:
-        st.subheader("Vertical Velocity vs Time")
         fig2, ax2 = plt.subplots()
-        ax2.plot(t, VZ)
+        ax2.plot(T, VZ)
         ax2.axhline(-20, linestyle="--", label="Parachute Limit")
         ax2.set_xlabel("Time (s)")
-        ax2.set_ylabel("Velocity (m/s)")
+        ax2.set_ylabel("Vertical Velocity (m/s)")
         ax2.legend()
         ax2.grid(True)
         st.pyplot(fig2)
 
-    # ---------------- TELEMETRY ----------------
-    st.subheader("Telemetry Data")
-    st.line_chart(
-        {
-            "Time": t,
-            "Vertical Velocity (m/s)": VZ,
-            "Vertical Acceleration (m/s²)": AZ
-        },
-        x="Time"
-    )
+    st.subheader("Telemetry")
+    st.line_chart({
+        "Vertical Velocity (m/s)": VZ,
+        "Vertical Acceleration (m/s²)": AZ,
+        "Yaw": YAW,
+        "Pitch": PITCH
+    })
